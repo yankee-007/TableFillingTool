@@ -68,7 +68,9 @@ GIT_POLICY 可显式设为 `disabled`；启用 Git 时仍遵循既有项目检�
 
 ## 项目入口与验证方式
 
-当前仅有治理文档；可用 `git status --short`、`git diff --check` 及文档链接/占位符/语义核对。没有已定义的业务安装、运行、测试、构建或部署命令；不为初始化触发未知脚本。人工业务验收尚不适用。
+当前为 Python/PySide6 Qt Widgets 桌面应用。启动 `python main.py`；依赖见 `requirements.txt`。临时数据回归：设置 `QT_QPA_PLATFORM=offscreen` 后执行 `python -m unittest discover -s tests -v`；语法检查 `python -m compileall -q app main.py tools tests`；差异检查 `git diff --check`；布局渲染 `python tools/render_preview.py`。测试只能用临时数据和模拟企微，不自动操作真实联系人。真实企微环境需按用户指定测试范围验收，不以模拟通过替代。
+
+用户指定的 StudentManagement 项目只读：禁止在其中修改、安装、编译、测试、启动应用或初始化数据库，不把其目录作为新工具的数据目录，不接管其 Git 状态。不读取真实数据；仅选择性参考代码，所有实现和验证都在本项目或独立临时目录中进行。新工具不得依赖源项目的 Python 包或运行数据。
 
 本次新建本地仓库采用 `main` 作为集成分支，不涉及已有分支重命名。初始化提交成功后才形成任务 worktree 的起点基线；若提交失败，先保留文件并报告缺失基线。后续任务分支采用 `task/<task-id>-<slug>`，无 Task 文件时采用唯一随机标识；工作区用 Git 注册关系与分支定位，不依赖某台机器的绝对路径。默认由当前任务中明确取得集成写入权的一名执行者串行 squash 到 main，未交还前其他执行者不写集成目录；没有互斥条件时必须明确串行交接，不用 Markdown 状态或 worktree lock 充当写锁。main 只接收已满足集成条件的成果。本次初始化后停止，不创建下一任务的分支/worktree。已确认远端分支范围为 origin 的 main，本次推送授权见上文；不默认上传所有任务分支。
 
