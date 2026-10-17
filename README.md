@@ -11,6 +11,8 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+也可使用 `python -m pip install -r reqstment.txt`；该文件引用标准依赖清单 `requirements.txt`，两种入口使用相同依赖。
+
 依赖已安装时直接双击 `start.bat`。当前验证环境为 Windows、Python 3.14.7、PySide6 6.11.2、openpyxl 3.1.5。工具不自动安装依赖。
 
 本地数据默认保存在 Qt 的本工具专用应用目录（Windows 通常为 `%LOCALAPPDATA%\LocalTools\TableFillingTool\tables.sqlite3`），与 StudentManagement 完全独立。可用 `python main.py --data-dir "D:\MyTableData"` 指定其他目录；同一目录同时仅允许一个工具实例。备份本地工作区请先关闭工具，再复制该数据目录；Excel/CSV 导出只包含表格内容，不包含字段类型与联系人配置。
