@@ -12,7 +12,7 @@ from app.filter_dialog import ColumnFilterDialog
 from app.filtering import matches, next_record, options
 from app.service import Workspace
 from app.ui import MainWindow
-from app.verification import contact_matches, prepare_tasks, save_confirmed
+from app.verification import VerificationJob, contact_matches, prepare_tasks, save_confirmed
 from app.verification_dialog import VerificationDialog
 from app.wecom import ContactSearch, ContactNotFoundError, Window
 from test_core import FakeDesktop, fixture
@@ -95,6 +95,74 @@ class DecisionTests(unittest.TestCase):
         desktop.keys = FakeDesktop.keys.__get__(desktop)
         with self.assertRaisesRegex(RuntimeError, "焦点"):
             ContactSearch(desktop, wait=0, sleep=lambda _: None).verify("py169张三")
+
+    def test_verification_delays_every_desktop_step_half_a_second(self):
+        desktop = FakeDesktop()
+        now, sleeps, timeline = [0.0], [], []
+        original_keys = desktop.keys
+        original_foreground = desktop.foreground
+
+        def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+
+        def keys(*value):
+            timeline.append((value, now[0]))
+            original_keys(*value)
+
+        def foreground():
+            window = original_foreground()
+            if window == desktop.chat and not any(step == "title" for step, _ in timeline):
+                timeline.append(("title", now[0]))
+            return window
+
+        desktop.activate = lambda window: timeline.append(("activate", now[0]))
+        desktop.keys, desktop.foreground = keys, foreground
+        result = ContactSearch(desktop, sleep=sleep, clock=lambda: now[0]).verify("py169张三")
+        self.assertEqual(result[0], "已添加")
+        self.assertEqual([step for step, _ in timeline], ["activate", ("ctrl", "f"), ("ctrl", "a"),
+                         ("ctrl", "v"), ("enter",), ("ctrl", "o"), "title", ("ctrl", "w")])
+        self.assertEqual([stamp for _, stamp in timeline], [i * .5 for i in range(8)])
+        self.assertEqual(sleeps, [.5] * 8)
+        self.assertEqual(now[0], 4.0)
+
+    def test_delayed_chat_polling_uses_half_second_and_rechecks_focus_after_wait(self):
+        desktop = FakeDesktop()
+        now, sleeps = [0.0], []
+
+        def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+
+        original_foreground = desktop.foreground
+
+        def foreground():
+            # The independent chat takes one extra poll to become available.
+            if desktop.current == desktop.chat and now[0] < 3.5:
+                return desktop.main
+            return original_foreground()
+
+        desktop.foreground = foreground
+        self.assertEqual(ContactSearch(desktop, sleep=sleep, clock=lambda: now[0]).verify("py169张三")[0], "已添加")
+        self.assertEqual(sleeps, [.5] * 9)
+        desktop = FakeDesktop()
+        now = [0.0]
+
+        def lose_focus(delay):
+            now[0] += delay
+            if now[0] == 3.5:
+                desktop.current = Window(99, 8, "other", "other.exe")
+
+        with self.assertRaisesRegex(RuntimeError, "焦点"):
+            ContactSearch(desktop, sleep=lose_focus, clock=lambda: now[0]).verify("py169张三")
+        self.assertNotIn(("ctrl", "w"), desktop.events)
+
+    def test_batch_worker_explicitly_uses_half_second_delay(self):
+        job = VerificationJob(FakeDesktop(), "py169张三", "contains")
+        with patch("app.wecom.ContactSearch") as search:
+            search.return_value.verify.return_value = ("未找到", "", "模拟结果")
+            job.run()
+            search.assert_called_once_with(job.desktop, wait=.5)
 
 
 class ControlledJob(QObject):

@@ -87,9 +87,9 @@ class VerificationJob(QThread):
         self.desktop, self.query, self.mode = desktop, query, mode
 
     def run(self):
-        from .wecom import ContactSearch, ContactNotFoundError
+        from .wecom import CONTACT_STEP_DELAY, ContactSearch, ContactNotFoundError
         try:
-            result = ContactSearch(self.desktop).verify(self.query, mode=self.mode)
+            result = ContactSearch(self.desktop, wait=CONTACT_STEP_DELAY).verify(self.query, mode=self.mode)
         except ContactNotFoundError as exc:
             result = "未找到", "", str(exc) + "；保留原值"
         except Exception as exc:

@@ -156,12 +156,15 @@ class NativeDesktop:
             raise RuntimeError("系统拒绝键盘输入，请确认企业微信与工具使用相同权限级别")
 
 
+CONTACT_STEP_DELAY = 0.5
+
+
 class ContactNotFoundError(RuntimeError):
     pass
 
 
 class ContactSearch:
-    def __init__(self, desktop, *, wait=0.5, timeout=3.0, sleep=time.sleep,
+    def __init__(self, desktop, *, wait=CONTACT_STEP_DELAY, timeout=3.0, sleep=time.sleep,
                  clock=time.monotonic, cancelled=lambda: False):
         self.desktop, self.wait, self.timeout = desktop, wait, timeout
         self.sleep, self.clock, self.cancelled = sleep, clock, cancelled
@@ -190,6 +193,7 @@ class ContactSearch:
         self.press(main, "ctrl", "f")
         self.sleep(self.wait)
         self.press(main, "ctrl", "a")
+        self.sleep(self.wait)
         # The GUI temporarily placed the immutable search query on the clipboard.
         if self.desktop.clipboard_text() != contact:
             raise RuntimeError("剪贴板已变化，已停止搜索；请重新打开联系人")
@@ -202,6 +206,7 @@ class ContactSearch:
             return main, None
         self.press(main, "ctrl", "o")
         deadline = self.clock() + self.timeout
+        self.sleep(self.wait)
         while self.clock() < deadline:
             if self.cancelled():
                 raise RuntimeError("打开操作已取消")
@@ -212,7 +217,7 @@ class ContactSearch:
                 self.check(current)
                 return main, current
             self.check(main)
-            self.sleep(0.1)
+            self.sleep(self.wait)
         self.check(main)
         raise ContactNotFoundError("未打开联系人独立聊天窗，请检查 Ctrl+O 快捷键或搜索结果")
 
@@ -237,6 +242,8 @@ class ContactSearch:
         if mode not in ("contains", "exact"):
             raise ValueError("无效的联系人匹配方式")
         main, chat = self._locate(contact)
+        self.sleep(self.wait)
+        self.check(chat)
         if not contact_matches(contact, chat.title, mode):
             return "待确认", chat.title, "联系人标题不匹配；原值保留"
         self._close_chat(main, chat)
