@@ -34,6 +34,8 @@
 
 专用 `tables.sqlite3` 保存 metadata/schema_version、sheets（列定义和联系人配置 JSON）与 records（稳定 ID、位置和单元格 JSON），外键保护表关联。当前 schema_version=1，无源项目数据库迁移。程序通过 QLockFile 限制同一数据目录一个写入实例。导出单元格为文本，CSV 保护公式前缀；XLSX/CSV 导出不携带填写字段类型和联系人配置，完整工作区备份需关闭后复制数据目录。
 
+“我的表格”右键菜单按点击项稳定 ID 删除，先保存输入及确认，运行中的文件/联系人任务阻止删除。Store 在事务内删除 sheets，现有外键级联删除 records；数据库成功后才更新内存与界面。主表、浮窗和缓存验证窗口同步解除已删除表的引用，删除最后一张表恢复首次使用空态；原始导入文件不参与删除。主表将 Shift 滚轮转换为横向像素滚动，普通滚轮继续交由 Qt 处理纵向滚动。
+
 运行依赖只有 PySide6/openpyxl 和 Python 标准库；Windows API 经 ctypes 使用，不需要源项目、平台账号或网络服务。Git origin 为用户指定的 `yankee-007/TableFillingTool`，集成分支 main。没有自动化服务、部署或发送能力。
 
 ## 验证依据与未确定内容

@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QAction, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
 
 from app.data import Store
 from app.fonts import configure_font
@@ -213,7 +214,7 @@ class WindowTests(unittest.TestCase):
         self.window.title.setText("这是一张具有很长名称的虚构联系人填写与反馈记录工作表")
         APP.processEvents()
         self.assertEqual((self.window.width(), self.window.height()), (980, 620))
-        for control in (self.window.import_button, self.window.export_button, self.window.follow_button,
+        for control in (self.window.import_button, self.window.verify_button, self.window.export_button, self.window.follow_button,
                         self.window.search, self.window.add_row_button, self.window.add_field_button,
                         self.window.contact_settings_button, self.window.open_button):
             self.assertTrue(control.isVisible())
@@ -223,6 +224,12 @@ class WindowTests(unittest.TestCase):
             self.assertTrue(self.window.rect().contains(bottom), control.accessibleName())
         self.assertLess(self.window.title.width(), self.window.title.fontMetrics().horizontalAdvance(self.window.title.text()))
         self.assertEqual(self.window.title.toolTip(), self.window.title.text())
+        import_pos = self.window.import_button.mapTo(self.window, QPoint(0, 0))
+        verify_pos = self.window.verify_button.mapTo(self.window, QPoint(0, 0))
+        export_pos = self.window.export_button.mapTo(self.window, QPoint(0, 0))
+        self.assertEqual(import_pos.y(), verify_pos.y())
+        self.assertGreaterEqual(verify_pos.x(), import_pos.x() + self.window.import_button.width())
+        self.assertLess(verify_pos.x() + self.window.verify_button.width(), export_pos.x())
 
     def test_no_results_action_clears_filter_without_changing_data(self):
         self.window.search.setText("虚构无匹配关键词")
@@ -307,6 +314,79 @@ class WindowTests(unittest.TestCase):
         result = self.window.form.result
         self.assertFalse(result.wordWrap())
         self.assertGreaterEqual(result.width(), result.fontMetrics().horizontalAdvance(result.text()))
+
+
+    def test_sheet_context_menu_targets_clicked_table_and_requires_confirmation(self):
+        other = fixture("右键目标")
+        self.workspace.add_sheets([other])
+        APP.processEvents()
+        position = self.window.sheet_list.visualItemRect(self.window.sheet_list.item(1)).center()
+        action = QAction("删除此表格…", self.window)
+        with patch("app.ui.QMenu") as factory, patch("app.ui.QMessageBox.question", return_value=QMessageBox.StandardButton.No) as confirm:
+            factory.return_value.addAction.return_value = action
+            factory.return_value.exec.side_effect = lambda point: action.triggered.emit()
+            self.window.sheet_context_menu(position)
+            self.assertIn("右键目标", confirm.call_args.args[2])
+        self.assertEqual(len(self.workspace.sheets), 2)
+        with patch("app.ui.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.delete_sheet(other.id)
+        self.assertEqual(self.workspace.sheets, [self.sheet])
+        self.assertEqual(self.window.model.sheet_id, self.sheet.id)
+
+    def test_delete_last_sheet_blocks_failed_save_then_clears_editors_and_cached_verifier(self):
+        with patch("app.ui.VerificationDialog.exec", return_value=0):
+            self.window.verify_contacts()
+        self.window.floating.form.bind(self.window.current_key)
+        cid = self.sheet.columns[2].id
+        self.enter(self.window.form, cid, "保留输入")
+        with patch.object(self.store, "save_cells", side_effect=OSError("disk full")), patch("app.ui.QMessageBox.question") as confirm:
+            self.window.delete_sheet(self.sheet.id)
+            confirm.assert_not_called()
+        self.assertEqual(self.window.form.pending[cid], "保留输入")
+        self.assertEqual(len(self.workspace.sheets), 1)
+        with patch("app.ui.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.delete_sheet(self.sheet.id)
+        APP.processEvents()
+        self.assertEqual(self.store.load(), [])
+        self.assertIsNone(self.window.current_key)
+        self.assertIsNone(self.window.form.key)
+        self.assertIsNone(self.window.floating.form.key)
+        self.assertIsNone(self.window.verifier_dialog)
+        self.assertEqual(self.window.stack.currentWidget(), self.window.empty)
+        self.assertFalse(self.window.verify_button.isVisible())
+
+    def test_shift_wheel_scrolls_horizontal_for_angle_and_pixel_deltas(self):
+        other = fixture("滚动示例", names=tuple(f"虚构{index}" for index in range(50)))
+        self.workspace.add_sheets([other])
+        self.window.sheet_list.setCurrentRow(1)
+        table = self.window.table
+        for i in range(table.model().columnCount()):
+            table.setColumnWidth(i, 500)
+        APP.processEvents()
+        horizontal, vertical = table.horizontalScrollBar(), table.verticalScrollBar()
+        self.assertGreater(horizontal.maximum(), 0)
+        self.assertGreater(vertical.maximum(), 0)
+
+        def wheel(angle, pixel=QPoint(), shift=True):
+            event = QWheelEvent(QPointF(30, 30), QPointF(table.viewport().mapToGlobal(QPoint(30, 30))),
+                                pixel, angle, Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier,
+                                Qt.ScrollPhase.NoScrollPhase, False)
+            QApplication.sendEvent(table.viewport(), event)
+
+        wheel(QPoint(0, -120), shift=False)
+        self.assertGreater(vertical.value(), 0)
+        self.assertEqual(horizontal.value(), 0)
+        before_vertical = vertical.value()
+        wheel(QPoint(0, -120))
+        self.assertGreater(horizontal.value(), 0)
+        self.assertEqual(vertical.value(), before_vertical)
+        before_horizontal = horizontal.value()
+        wheel(QPoint(), QPoint(0, -35))
+        self.assertEqual(horizontal.value(), before_horizontal + 35)
+        wheel(QPoint(0, 120))
+        self.assertLess(horizontal.value(), before_horizontal + 35)
+        self.assertEqual(vertical.value(), before_vertical)
 
 
 class ContrastTests(unittest.TestCase):

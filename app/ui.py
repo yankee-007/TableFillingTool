@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QApplication, QCheckBox, QComboBox,
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter,
+    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter,
     QSizePolicy, QStackedWidget, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
 )
 
@@ -465,6 +465,11 @@ class FloatingWindow(QWidget):
             for sheet in self.workspace.sheets:
                 self.scope.addItem(sheet.title, sheet.id)
             self.scope.setCurrentIndex(max(0, self.scope.findData(scope)))
+        self._scope_id = self.scope.currentData() or ""
+        if self.form.key and not any(sheet.id == self.form.key[0] for sheet in self.workspace.sheets):
+            self.form.bind(None)
+            self.last_title = ""
+            self._notice("原表格已删除，请选择其他表格。", "warning")
 
     def _scope_changed(self):
         scope = self.scope.currentData() or ""
@@ -579,6 +584,8 @@ class MainWindow(QMainWindow):
         self.sheet_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.sheet_list.setIconSize(QSize(18, 18))
         self.sheet_list.currentRowChanged.connect(self._select_sheet)
+        self.sheet_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sheet_list.customContextMenuRequested.connect(self.sheet_context_menu)
         side.addWidget(self.sheet_list, 1)
         side.addWidget(button("新建表格", self.new_sheet, glyph="plus"))
         side.addSpacing(16)
@@ -606,6 +613,9 @@ class MainWindow(QMainWindow):
         self.export_button = button("导出当前表", self.export_dialog, glyph="export")
         self.follow_button = button("聊天跟随浮窗", self.show_floating, primary=True, glyph="chat")
         heading.addWidget(self.import_button)
+        self.verify_button = button("验证联系人", self.verify_contacts, glyph="check")
+        self.verify_button.setToolTip("设置验证字段与匹配方式，仅验证当前表搜索/筛选匹配的名单")
+        heading.addWidget(self.verify_button)
         heading.addWidget(self.export_button)
         heading.addSpacing(4)
         heading.addWidget(self.follow_button)
@@ -738,8 +748,6 @@ class MainWindow(QMainWindow):
         self.contact_hint = ElidedLabel("")
         self.contact_hint.setObjectName("caption")
         self.form.action_layout.addWidget(self.contact_hint)
-        self.verify_button = button("验证联系人…", self.verify_contacts, glyph="check")
-        self.form.action_layout.addWidget(self.verify_button)
         editor_layout.addWidget(self.form, 1)
         editor.setMinimumWidth(280)
         self.splitter.addWidget(editor)
@@ -791,6 +799,9 @@ class MainWindow(QMainWindow):
 
     def _refresh_sheets(self):
         current = self.model.sheet_id
+        if self.verifier_dialog and not any(sheet.id == self.verifier_dialog.sheet.id for sheet in self.workspace.sheets):
+            self.verifier_dialog.deleteLater()
+            self.verifier_dialog = None
         self.sheet_count.setText(str(len(self.workspace.sheets)))
         with QSignalBlocker(self.sheet_list):
             self.sheet_list.clear()
@@ -826,8 +837,9 @@ class MainWindow(QMainWindow):
         self._filter_text = ""
         self._selecting = False
         self.stack.setCurrentWidget(self.workbench if sid else self.empty)
-        for control in (self.import_button, self.export_button, self.follow_button):
+        for control in (self.import_button, self.verify_button, self.export_button, self.follow_button):
             control.setVisible(bool(sid))
+        self.verify_button.setEnabled(bool(sid) and not self.contact_busy and not self.file_job)
         self.export_button.setEnabled(bool(sid))
         self.open_button.setEnabled(False)
         self.contact_hint.hide()
@@ -838,6 +850,35 @@ class MainWindow(QMainWindow):
             self._counts()
             if self.filter.rowCount():
                 self.table.setCurrentIndex(self.filter.index(0, 0))
+        else:
+            self.title.setText("我的工作空间")
+            self.subtitle.setText("在聊天过程中，完成每一条记录。")
+
+    def sheet_context_menu(self, position):
+        item = self.sheet_list.itemAt(position)
+        if item is None:
+            return
+        sid = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self.sheet_list)
+        delete = menu.addAction("删除此表格…")
+        delete.setEnabled(not self.contact_busy and not self.file_job)
+        delete.triggered.connect(lambda checked=False: self.delete_sheet(sid))
+        menu.exec(self.sheet_list.viewport().mapToGlobal(position))
+        menu.deleteLater()
+
+    def delete_sheet(self, sid):
+        if self.contact_busy or self.file_job or not self.flush_all():
+            return
+        try:
+            sheet = self.workspace.sheet(sid)
+        except StopIteration:
+            return
+        answer = QMessageBox.question(self, "删除表格", f"确定删除“{sheet.title}”及其中 {len(sheet.rows)} 条记录？\n"
+                                      "只删除本工具中的副本，原始导入文件不会改变。此操作无法撤销。",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes and self.flush_all():
+            self.workspace.delete_sheet(sid)
 
     def _selection_changed(self, current, previous):
         if self._selecting:
@@ -1085,6 +1126,7 @@ class MainWindow(QMainWindow):
             self.show_notice("文件操作进行中，请稍候。")
             return
         self.import_button.setEnabled(False)
+        self.verify_button.setEnabled(False)
         self.empty_import.setEnabled(False)
         self.export_button.setEnabled(False)
         self.progress.show()
@@ -1099,6 +1141,7 @@ class MainWindow(QMainWindow):
     def _file_finished(self):
         self.file_job = None
         self.import_button.setEnabled(True)
+        self.verify_button.setEnabled(bool(self.model.sheet) and not self.contact_busy)
         self.empty_import.setEnabled(True)
         self.export_button.setEnabled(bool(self.model.sheet))
         self.progress.hide()
@@ -1167,6 +1210,7 @@ class MainWindow(QMainWindow):
         job = Job(lambda: ContactSearch(desktop, cancelled=job.isInterruptionRequested).open(
             query, verify=options.get("verify_contact", True), keep_float=options.get("keep_float", True)), self)
         self.contact_job = job
+        self.verify_button.setEnabled(False)
         self.open_button.setEnabled(False)
         self.show_notice("正在打开：" + query + "；请暂时不要操作鼠标键盘。")
         job.succeeded.connect(lambda message: self.show_notice(message))
@@ -1183,6 +1227,7 @@ class MainWindow(QMainWindow):
         self._clipboard_backup = None
         self.contact_job = None
         self.open_button.setEnabled(bool(self.current_key))
+        self.verify_button.setEnabled(bool(self.model.sheet) and not self.file_job)
 
     def closeEvent(self, event):
         if self.contact_job or self.file_job:

@@ -17,7 +17,7 @@ class TableModel(QAbstractTableModel):
 
     @property
     def sheet(self):
-        return self.workspace.sheet(self.sheet_id) if self.sheet_id else None
+        return next((sheet for sheet in self.workspace.sheets if sheet.id == self.sheet_id), None)
 
     def use_sheet(self, sid):
         self.beginResetModel()
@@ -120,7 +120,7 @@ class TableFilter(QSortFilterProxyModel):
         return [row for row in visible if self.matches_row(row)]
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if index.isValid() and self.active and role in (Qt.ItemDataRole.BackgroundRole,
+        if index.isValid() and self.sourceModel().sheet and self.active and role in (Qt.ItemDataRole.BackgroundRole,
                                                         Qt.ItemDataRole.ForegroundRole,
                                                         Qt.ItemDataRole.ToolTipRole):
             row = self.sourceModel().sheet.rows[self.mapToSource(index).row()]

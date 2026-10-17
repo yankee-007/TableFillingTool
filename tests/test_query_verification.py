@@ -200,6 +200,35 @@ class QueryAndBatchTests(unittest.TestCase):
         self.assertIsNone(self.dialog.job)
         self.assertIn("没有匹配记录", self.dialog.notice.text())
 
+    def test_toolbar_verifies_filtered_list_not_selection_and_refreshes_cached_scope(self):
+        wanted = [self.sheet.rows[i].id for i in (0, 2)]
+        self.window.set_column_filter(self.search_cid, {"mode": "values", "values": ["张三", "王五"]})
+        self.window.select_record(wanted[0])
+        observed = []
+
+        def run_dialog(dialog):
+            observed.append([row.id for row in dialog.scope()])
+            with patch.object(dialog.hotkey, "start"), patch.object(dialog.hotkey, "close"):
+                dialog.start()
+                APP.processEvents()
+                if observed[-1]:
+                    self.assertEqual([task.rid for task in dialog.tasks], wanted)
+                    dialog.stop()
+                    dialog.job.complete("未找到", "", "模拟结果")
+                else:
+                    self.assertFalse(dialog.active)
+                    self.assertIsNone(dialog.job)
+                    self.assertIn("没有匹配记录", dialog.notice.text())
+            return 0
+
+        with patch.object(VerificationDialog, "exec", new=run_dialog):
+            self.window.verify_button.click()
+            previous_dialog = self.window.verifier_dialog
+            self.window.search.setText("李四")
+            self.window.verify_button.click()
+            self.assertIs(self.window.verifier_dialog, previous_dialog)
+        self.assertEqual(observed, [wanted, []])
+
     def test_no_writeback_keeps_cells_and_hotkey_conflict_starts_nothing(self):
         self.dialog.result_field.setCurrentIndex(0)
         APP.clipboard().setText("原始内容")

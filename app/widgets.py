@@ -1,7 +1,7 @@
 """Small presentation components used by the native desktop UI."""
 from PySide6.QtCore import QPointF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QComboBox, QLabel, QTableView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QLabel, QTableView, QVBoxLayout, QWidget
 
 from .theme import COLORS
 
@@ -40,6 +40,7 @@ class ElidedLabel(QLabel):
 class WorkbenchTable(QTableView):
     def __init__(self):
         super().__init__()
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.empty_overlay = QWidget(self.viewport())
         self.empty_overlay.setObjectName("tableEmpty")
         self.empty_overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -47,6 +48,19 @@ class WorkbenchTable(QTableView):
         self.empty_layout.setContentsMargins(16, 20, 16, 20)
         self.empty_layout.setSpacing(10)
         self.empty_overlay.hide()
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            bar = self.horizontalScrollBar()
+            pixels, angles = event.pixelDelta(), event.angleDelta()
+            delta = pixels.x() or pixels.y()
+            if not delta:
+                delta = ((angles.x() or angles.y()) / 120 * QApplication.styleHints().wheelScrollLines()
+                         * self.fontMetrics().height())
+            bar.setValue(round(bar.value() - delta))
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

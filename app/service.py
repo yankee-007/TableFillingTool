@@ -119,3 +119,15 @@ class Workspace(QObject):
         except Exception as exc:
             self.notice.emit("删除失败：" + str(exc), True)
             return False
+
+    def delete_sheet(self, sid: str) -> bool:
+        try:
+            self.sheet(sid)
+            self.store.delete_sheet(sid)
+            self.sheets = [sheet for sheet in self.sheets if sheet.id != sid]
+            self.sheetsChanged.emit()
+            self.notice.emit("已删除本工具中的表格副本", False)
+            return True
+        except Exception as exc:
+            self.notice.emit("表格删除失败，原有内容已保留：" + str(exc), True)
+            return False

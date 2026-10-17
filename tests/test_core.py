@@ -169,6 +169,25 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(len(self.store.load()), 2)
 
 
+    def test_delete_sheet_cascades_only_its_rows_and_survives_restart(self):
+        another = fixture("保留的表格")
+        self.workspace.add_sheets([another])
+        self.assertTrue(self.workspace.delete_sheet(self.sheet.id))
+        self.assertEqual([s.id for s in self.store.load()], [another.id])
+        remaining = self.store.connection.execute("SELECT sheet_id FROM records").fetchall()
+        self.assertEqual(remaining, [(another.id,)] * len(another.rows))
+        self.assertEqual(self.workspace.sheets, [another])
+
+    def test_delete_sheet_transaction_failure_preserves_rows_and_memory(self):
+        self.store.connection.execute("CREATE TRIGGER reject_delete BEFORE DELETE ON sheets "
+                                      "BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+        self.assertFalse(self.workspace.delete_sheet(self.sheet.id))
+        self.assertEqual(self.workspace.sheets, [self.sheet])
+        restored = self.store.load()
+        self.assertEqual(len(restored), 1)
+        self.assertEqual([row.id for row in restored[0].rows], [row.id for row in self.sheet.rows])
+
+
 class MatchingTests(unittest.TestCase):
     def test_han_boundaries_and_main_window_excluded(self):
         self.assertFalse(name_in_title("张三", "张三丰"))

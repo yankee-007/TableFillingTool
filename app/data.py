@@ -137,3 +137,9 @@ class Store:
 
     def close(self):
         self.connection.close()
+
+    def delete_sheet(self, sheet_id: str):
+        with self.connection:
+            cursor = self.connection.execute("DELETE FROM sheets WHERE id=?", (sheet_id,))
+            if cursor.rowcount != 1:
+                raise ValueError("表格已不存在，未删除")
