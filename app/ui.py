@@ -17,12 +17,15 @@ from PySide6.QtWidgets import (
 
 from .data import Column, Record, Sheet, infer_settings
 from .files import export_file, import_file
+from .filter_dialog import ColumnFilterDialog
+from .filtering import next_record
 from .matching import candidates
 from .models import TableFilter, TableModel
 from .icons import icon
 from .theme import COLORS, set_tone
 from .wecom import ContactSearch, NativeDesktop
 from .widgets import ElidedLabel, FieldComboBox, WorkbenchTable
+from .verification_dialog import VerificationDialog
 
 
 def label(text, name="muted"):
@@ -540,6 +543,7 @@ class MainWindow(QMainWindow):
         self._selecting = False
         self.file_job = None
         self.contact_job = None
+        self.verifier_dialog = None
         self._clipboard_backup = None
         self.setWindowTitle("TableFillingTool · 随聊填表")
         self.setWindowIcon(icon("brand"))
@@ -680,7 +684,7 @@ class MainWindow(QMainWindow):
         self.table.setItemDelegate(self.delegate)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.setSortingEnabled(True)
+        self.table.setSortingEnabled(False)
         self.table.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -689,6 +693,8 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setMinimumSectionSize(90)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionsMovable(True)
+        self.table.horizontalHeader().setSectionsClickable(True)
+        self.table.horizontalHeader().sectionClicked.connect(self.column_filter)
         self.table.selectionModel().currentChanged.connect(self._selection_changed)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
         delete = QAction("删除选中的行…", self.table)
@@ -699,7 +705,10 @@ class MainWindow(QMainWindow):
         footer.setContentsMargins(14, 10, 14, 10)
         self.summary = label("0 条记录", "caption")
         footer.addWidget(self.summary, 1)
-        footer.addWidget(label("双击单元格编辑", "caption"))
+        self.clear_filter_button = button("清除筛选", self.clear_filters, name="quiet")
+        self.clear_filter_button.hide()
+        footer.addWidget(self.clear_filter_button)
+        footer.addWidget(label("表头筛选 · 双击编辑", "caption"))
         table_layout.addLayout(footer)
         self.table_empty_title = label("还没有记录", "section")
         self.table_empty_help = label("新增一行，开始填写联系人信息。", "caption")
@@ -729,6 +738,8 @@ class MainWindow(QMainWindow):
         self.contact_hint = ElidedLabel("")
         self.contact_hint.setObjectName("caption")
         self.form.action_layout.addWidget(self.contact_hint)
+        self.verify_button = button("验证联系人…", self.verify_contacts, glyph="check")
+        self.form.action_layout.addWidget(self.verify_button)
         editor_layout.addWidget(self.form, 1)
         editor.setMinimumWidth(280)
         self.splitter.addWidget(editor)
@@ -767,6 +778,7 @@ class MainWindow(QMainWindow):
     def _shortcuts(self):
         for key, callback in (("Ctrl+O", self.import_dialog), ("Ctrl+N", self.new_sheet),
                               ("Ctrl+Shift+S", self.export_dialog), ("Ctrl+S", self.flush_all),
+                              ("Ctrl+Shift+L", lambda: self.column_filter(max(0, self.table.currentIndex().column()))),
                               ("Ctrl+Shift+F", self.show_floating), ("F8", self.open_contact)):
             action = QAction(self)
             action.setShortcut(QKeySequence(key))
@@ -809,7 +821,8 @@ class MainWindow(QMainWindow):
         self.model.use_sheet(sid)
         with QSignalBlocker(self.search):
             self.search.clear()
-        self.filter.setFilterFixedString("")
+        self.filter.reset_query()
+        self._filter_columns = tuple(c.id for c in self.model.sheet.columns) if sid else ()
         self._filter_text = ""
         self._selecting = False
         self.stack.setCurrentWidget(self.workbench if sid else self.empty)
@@ -846,6 +859,8 @@ class MainWindow(QMainWindow):
     def _record_edited(self, sid, rid, changes):
         if self.current_key == (sid, rid):
             self._update_contact_hint()
+        if sid == self.model.sheet_id:
+            self._counts()
 
     def _update_contact_hint(self):
         if self.current_key:
@@ -858,6 +873,11 @@ class MainWindow(QMainWindow):
 
     def _structure(self, sid):
         if sid == self.model.sheet_id:
+            columns = tuple(c.id for c in self.model.sheet.columns)
+            if columns != self._filter_columns:
+                self.filter.rules = {cid: rule for cid, rule in self.filter.rules.items() if cid in columns}
+                self._filter_columns = columns
+                self.filter.reapply()
             previous = self.current_key
             if previous:
                 try:
@@ -879,18 +899,23 @@ class MainWindow(QMainWindow):
     def _counts(self):
         if self.model.sheet:
             count, total = self.filter.rowCount(), len(self.model.sheet.rows)
-            self.summary.setText(f"显示 {count} / {total} 条记录" if self.search.text() else f"共 {total} 条记录")
+            stale = count - len(self.filter.scope_rows()) if self.filter.active else 0
+            text = f"显示 {count} / {total} 条记录" if self.filter.active else f"共 {total} 条记录"
+            if stale:
+                text += f" · {stale} 条已不符合筛选"
+            self.summary.setText(text)
+            self.clear_filter_button.setVisible(self.filter.active)
             self.table.empty_overlay.setVisible(count == 0)
             if not count:
-                filtered = bool(self.search.text())
+                filtered = self.filter.active
                 self.table_empty_title.setText("没有符合条件的记录" if filtered else "还没有记录")
-                self.table_empty_help.setText("试试其他关键词，或清除当前搜索。" if filtered else "新增一行，开始填写联系人信息。")
-                self.table_empty_action.setText("清除搜索" if filtered else "新增首行")
+                self.table_empty_help.setText("试试其他条件，或清除当前搜索与列筛选。" if filtered else "新增一行，开始填写联系人信息。")
+                self.table_empty_action.setText("清除搜索" if filtered and not self.filter.rules else "清除筛选" if filtered else "新增首行")
                 self.table.position_empty()
 
     def _empty_table_action(self):
-        if self.search.text():
-            self.search.clear()
+        if self.filter.active:
+            self.clear_filters()
         else:
             self.add_row()
 
@@ -909,12 +934,17 @@ class MainWindow(QMainWindow):
             with QSignalBlocker(self.search):
                 self.search.setText(self._filter_text)
             return
+        previous = [self.filter.index(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.filter.rowCount())]
+        old_id = self.current_key[1] if self.current_key else None
+        self._selecting = True
         self.filter.setFilterFixedString(text)
-        self.filter.invalidate()
+        self._selecting = False
         self._filter_text = text
         self._counts()
-        if self.filter.rowCount():
-            self.table.setCurrentIndex(self.filter.index(0, 0))
+        visible = [self.filter.index(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.filter.rowCount())]
+        target = next_record(visible, old_id, previous)
+        if target:
+            self.select_record(target)
         else:
             self.current_key = None
             self.form.bind(None)
@@ -923,6 +953,59 @@ class MainWindow(QMainWindow):
 
     def reapply_filter(self):
         self._filter_changed(self.search.text())
+
+    def clear_filters(self):
+        if not self.flush_all():
+            return
+        self.filter.rules.clear()
+        with QSignalBlocker(self.search):
+            self.search.clear()
+        self._filter_changed("")
+
+    def set_column_filter(self, cid, rule):
+        if not self.model.sheet or not self.flush_all():
+            return False
+        if rule["mode"] == "clear":
+            self.filter.rules.pop(cid, None)
+        else:
+            self.filter.rules[cid] = rule
+        self.reapply_filter()
+        return True
+
+    def column_filter(self, section):
+        if not self.model.sheet or not 0 <= section < len(self.model.sheet.columns) or not self.flush_all():
+            return
+        cid = self.model.sheet.columns[section].id
+        dialog = ColumnFilterDialog(self.model.sheet, cid, self.filter, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.sort_order is not None:
+                self.filter.sort(section, dialog.sort_order)
+                self.table.horizontalHeader().setSortIndicator(section, dialog.sort_order)
+                self.table.horizontalHeader().setSortIndicatorShown(True)
+            elif dialog.rule is not None:
+                self.set_column_filter(cid, dialog.rule)
+
+    def verify_contacts(self):
+        if self.contact_busy or self.file_job or not self.model.sheet or not self.flush_all():
+            return
+        # Keep following from moving an editor while verification opens temporary chats.
+        timer_active = self.floating.timer.isActive()
+        self.floating.timer.stop()
+        self.floating.setEnabled(False)
+        try:
+            signature = (self.model.sheet_id, tuple(col.id for col in self.model.sheet.columns))
+            if self.verifier_dialog is None or self.verifier_dialog.signature != signature:
+                if self.verifier_dialog:
+                    self.verifier_dialog.deleteLater()
+                self.verifier_dialog = VerificationDialog(self.workspace, self.model.sheet, self.filter.scope_rows, self)
+                self.verifier_dialog.signature = signature
+            dialog = self.verifier_dialog
+            dialog.refresh_scope()
+            dialog.exec()
+        finally:
+            self.floating.setEnabled(True)
+            if timer_active:
+                self.floating.timer.start()
 
     def new_sheet(self):
         if not self.flush_all():

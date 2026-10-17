@@ -15,6 +15,8 @@ from app.fonts import configure_font
 from app.service import Workspace
 from app.theme import STYLE
 from app.ui import ContactDialog, FieldDialog, MainWindow
+from app.filter_dialog import ColumnFilterDialog
+from app.verification_dialog import VerificationDialog
 
 
 def capture(widget, path, app):
@@ -68,6 +70,22 @@ def main():
             capture(window.floating, output / "save-error.png", app)
         window.floating.form.flush()
         window.floating.close()
+        name_cid = sheet.settings["name_column"]
+        column_filter = ColumnFilterDialog(sheet, name_cid, window.filter, window)
+        capture(column_filter, output / "column-filter-values.png", app)
+        column_filter.tabs.setCurrentIndex(1)
+        capture(column_filter, output / "column-filter-condition.png", app)
+        column_filter.close()
+        verifier = VerificationDialog(workspace, sheet, window.filter.scope_rows, window)
+        capture(verifier, output / "verification.png", app)
+        verifier.resize(680, 560)
+        capture(verifier, output / "verification-small.png", app)
+        verifier.close()
+        window.set_column_filter(name_cid, {"mode": "exact", "value": row.cells[name_cid]})
+        workspace.save_values(sheet.id, row.id, {name_cid: "示例小周（已处理）"})
+        window.resize(980, 620)
+        capture(window, output / "filter-stale.png", app)
+        window.clear_filters()
         for dialog, filename in ((ContactDialog(sheet, window), "contact-settings.png"),
                                  (FieldDialog(window), "add-field.png")):
             capture(dialog, output / filename, app)

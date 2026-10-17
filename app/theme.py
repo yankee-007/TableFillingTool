@@ -82,6 +82,10 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QCheckBox { spacing: 8px; min-height: 24px; }
 QCheckBox::indicator { width: 16px; height: 16px; }
 QCheckBox:focus { outline: 1px solid $accent; }
+QTabWidget::pane { background: $surface; border: 1px solid $line; border-radius: 6px; }
+QTabBar::tab { background: $canvas; color: $muted; padding: 8px 16px; border-bottom: 2px solid transparent; }
+QTabBar::tab:selected { background: $surface; color: $accent; border-bottom-color: $accent; }
+QTabBar::tab:focus { border: 1px solid $accent; }
 QSplitter::handle { background: transparent; width: 14px; }
 QSplitter::handle:hover { background: $line; }
 QStatusBar { background: $surface; border-top: 1px solid $line; padding: 2px 10px; }

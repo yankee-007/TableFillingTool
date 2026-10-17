@@ -156,6 +156,10 @@ class NativeDesktop:
             raise RuntimeError("系统拒绝键盘输入，请确认企业微信与工具使用相同权限级别")
 
 
+class ContactNotFoundError(RuntimeError):
+    pass
+
+
 class ContactSearch:
     def __init__(self, desktop, *, wait=0.5, timeout=3.0, sleep=time.sleep,
                  clock=time.monotonic, cancelled=lambda: False):
@@ -174,7 +178,7 @@ class ContactSearch:
         self.check(expected)
         self.desktop.keys(*keys)
 
-    def open(self, contact: str, *, verify=True, keep_float=True) -> str:
+    def _locate(self, contact: str, *, verify=True):
         contact = contact.strip()
         if not contact or any(ch in contact for ch in "\r\n\0"):
             raise ValueError("联系人不能为空或包含换行")
@@ -195,7 +199,7 @@ class ContactSearch:
         self.sleep(self.wait)
         if not verify:
             self.check(main)
-            return "已搜索（未验证），请人工核对：" + contact
+            return main, None
         self.press(main, "ctrl", "o")
         deadline = self.clock() + self.timeout
         while self.clock() < deadline:
@@ -205,13 +209,35 @@ class ContactSearch:
             if current and current.handle != main.handle:
                 if current.pid != main.pid or not current.is_wecom:
                     raise RuntimeError("焦点已转到其他程序，已停止操作")
-                if not name_in_title("".join(contact.split()), "".join(current.title.split())):
-                    raise RuntimeError("联系人窗口标题不匹配，已停止；请人工核对")
                 self.check(current)
-                if not keep_float:
-                    self.press(current, "ctrl", "w")
-                    self.sleep(self.wait)
-                    self.check(main)
-                return ("已打开联系人独立聊天窗：" if keep_float else "已定位联系人：") + contact
+                return main, current
+            self.check(main)
             self.sleep(0.1)
-        raise RuntimeError("未打开联系人独立聊天窗，请检查 Ctrl+O 快捷键或搜索结果")
+        self.check(main)
+        raise ContactNotFoundError("未打开联系人独立聊天窗，请检查 Ctrl+O 快捷键或搜索结果")
+
+    def _close_chat(self, main, chat):
+        self.press(chat, "ctrl", "w")
+        self.sleep(self.wait)
+        self.check(main)
+
+    def open(self, contact: str, *, verify=True, keep_float=True) -> str:
+        main, chat = self._locate(contact, verify=verify)
+        if chat is None:
+            return "已搜索（未验证），请人工核对：" + contact
+        if not name_in_title("".join(contact.split()), "".join(chat.title.split())):
+            raise RuntimeError("联系人窗口标题不匹配，已停止；请人工核对")
+        if not keep_float:
+            self._close_chat(main, chat)
+        return ("已打开联系人独立聊天窗：" if keep_float else "已定位联系人：") + contact
+
+    def verify(self, contact: str, *, mode="contains"):
+        """Read an independent chat's title. Only close it after a confirmed match."""
+        from .verification import contact_matches
+        if mode not in ("contains", "exact"):
+            raise ValueError("无效的联系人匹配方式")
+        main, chat = self._locate(contact)
+        if not contact_matches(contact, chat.title, mode):
+            return "待确认", chat.title, "联系人标题不匹配；原值保留，已暂停供人工核对"
+        self._close_chat(main, chat)
+        return "已添加", chat.title, "已确认联系人"
