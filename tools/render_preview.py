@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -13,7 +14,13 @@ from app.data import Store
 from app.fonts import configure_font
 from app.service import Workspace
 from app.theme import STYLE
-from app.ui import MainWindow
+from app.ui import ContactDialog, FieldDialog, MainWindow
+
+
+def capture(widget, path, app):
+    widget.show()
+    app.processEvents()
+    widget.grab().save(str(path))
 
 
 def main():
@@ -27,21 +34,44 @@ def main():
         store = Store(Path(directory) / "tables.sqlite3")
         workspace = Workspace(store)
         window = MainWindow(workspace)
+        window.resize(980, 620)
+        capture(window, output / "empty.png", app)
         window.sample()
-        window.show()
-        app.processEvents()
         for width, height in ((1400, 850), (980, 620)):
             window.resize(width, height)
-            app.processEvents()
-            window.grab().save(str(output / f"main-{width}.png"))
+            capture(window, output / f"main-{width}.png", app)
             print(f"Requested {width}x{height}; actual {window.width()}x{window.height()}")
+        sheet = workspace.sheets[0]
+        original_title = sheet.title
+        sheet.title = "虚构长表名：跨班期联系人登记与日常沟通反馈填写工作表"
+        window.title.setText(sheet.title)
+        capture(window, output / "long-title.png", app)
+        sheet.title = original_title
+        window.title.setText(sheet.title)
+        window.search.setText("不存在的虚构关键词")
+        capture(window, output / "no-results.png", app)
+        window.search.clear()
+        row = sheet.rows[0]
         window.floating.form.bind(window.current_key)
         window.floating.follow.setChecked(False)
         window.floating.notice.setText("手动填写中 · 虚构示例，无真实联系人")
-        window.floating.show()
+        capture(window.floating, output / "floating.png", app)
         window.floating.timer.stop()
-        app.processEvents()
-        window.floating.grab().save(str(output / "floating.png"))
+        window.floating.resize(290, 420)
+        capture(window.floating, output / "floating-small.png", app)
+        print(f"Small floating: {window.floating.width()}x{window.floating.height()}")
+        # Exercise error presentation without changing real data or external apps.
+        notes = next(col.id for col in sheet.columns if col.kind == "multiline")
+        window.floating.form.pending[notes] = "待保存的虚构反馈"
+        with patch.object(store, "save_cells", side_effect=OSError("模拟磁盘写入失败")):
+            window.floating.form.flush()
+            capture(window.floating, output / "save-error.png", app)
+        window.floating.form.flush()
+        window.floating.close()
+        for dialog, filename in ((ContactDialog(sheet, window), "contact-settings.png"),
+                                 (FieldDialog(window), "add-field.png")):
+            capture(dialog, output / filename, app)
+            dialog.close()
         window.close()
         store.close()
     print(output)

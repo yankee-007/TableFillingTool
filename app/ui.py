@@ -5,21 +5,24 @@ import copy
 from pathlib import Path
 
 import shiboken6
-from PySide6.QtCore import QEvent, QMimeData, QModelIndex, QSignalBlocker, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QModelIndex, QSignalBlocker, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QApplication, QCheckBox, QComboBox,
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter,
-    QStackedWidget, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
+    QSizePolicy, QStackedWidget, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
 )
 
 from .data import Column, Record, Sheet, infer_settings
 from .files import export_file, import_file
 from .matching import candidates
 from .models import TableFilter, TableModel
+from .icons import icon
+from .theme import COLORS, set_tone
 from .wecom import ContactSearch, NativeDesktop
+from .widgets import ElidedLabel, FieldComboBox, WorkbenchTable
 
 
 def label(text, name="muted"):
@@ -30,10 +33,15 @@ def label(text, name="muted"):
     return widget
 
 
-def button(text, callback, *, primary=False, name=""):
+def button(text, callback, *, primary=False, name="secondary", glyph=""):
     widget = QPushButton(text)
     widget.setObjectName("primary" if primary else name)
     widget.setAccessibleName(text)
+    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    if glyph:
+        color = COLORS["surface"] if primary or name == "contactAction" else COLORS["muted"]
+        widget.setIcon(icon(glyph, color))
+        widget.setIconSize(QSize(17, 17))
     widget.clicked.connect(callback)
     return widget
 
@@ -108,28 +116,53 @@ class RecordForm(QWidget):
         self.pending = {}
         self.editors = {}
         self.loading = False
+        self._summary_enabled = True
+        self._save_failed = False
         self.setObjectName("editorCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-        self.heading = label("选择一条记录", "section")
-        self.summary = label("在表格中选择联系人，在这里集中填写。")
-        layout.addWidget(self.heading)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.heading = ElidedLabel("选择一条记录")
+        self.heading.setObjectName("recordName")
+        self.heading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.summary = ElidedLabel("选择记录后，在这里集中填写。")
+        self.summary.setObjectName("caption")
+        record_header = QHBoxLayout()
+        record_header.addWidget(self.heading, 1, Qt.AlignmentFlag.AlignTop)
+        self.result = label("自动保存到本机", "saveState")
+        self.result.setAccessibleName("填写保存状态")
+        self.result.setWordWrap(False)
+        self.result.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.result.hide()
+        record_header.addWidget(self.result, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(record_header)
         layout.addWidget(self.summary)
+        self.error_row = QWidget()
+        error_layout = QHBoxLayout(self.error_row)
+        error_layout.setContentsMargins(0, 0, 0, 0)
+        error_layout.addWidget(label("输入已保留", "errorText"), 1)
+        self.retry = button("重试保存", self.flush, name="quiet", glyph="refresh")
+        error_layout.addWidget(self.retry)
+        self.error_row.hide()
+        layout.addWidget(self.error_row)
+        self.action_layout = QVBoxLayout()
+        self.action_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.action_layout)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setMinimumHeight(50)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.scroll, 1)
-        self.result = label("修改后自动保存到本机")
-        self.result.setAccessibleName("填写保存状态")
-        layout.addWidget(self.result)
-        self.retry = button("重试保存", self.flush)
-        self.retry.hide()
-        layout.addWidget(self.retry)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(450)
         self.timer.timeout.connect(self.flush)
         self.workspace.cellsChanged.connect(self._external_change)
+
+    def set_summary_visible(self, visible):
+        self._summary_enabled = visible
+        self.summary.setVisible(visible and not self._save_failed)
 
     def bind(self, key) -> bool:
         changed_key = key != self.key
@@ -151,19 +184,21 @@ class RecordForm(QWidget):
             self.loading = True
             self.editors = {}
             content = QWidget()
+            content.setObjectName("formFields")
             form = QVBoxLayout(content)
-            form.setContentsMargins(0, 0, 8, 0)
+            form.setContentsMargins(0, 8, 8, 4)
             form.setSpacing(6)
             if sheet:
                 for col in sheet.columns:
-                    form.addWidget(label(col.label, "section"))
+                    field_label = label(col.label, "fieldLabel")
+                    form.addWidget(field_label)
                     if col.kind == "multiline":
                         editor = QPlainTextEdit()
-                        editor.setMaximumHeight(120)
+                        editor.setMaximumHeight(100)
                         editor.setMinimumHeight(80)
                         editor.textChanged.connect(lambda cid=col.id: self._queue(cid))
                     elif col.kind == "choice":
-                        editor = QComboBox()
+                        editor = FieldComboBox()
                         for option in col.options:
                             editor.addItem(option, option)
                         editor.addItem("未填写（清空）", "")
@@ -177,9 +212,11 @@ class RecordForm(QWidget):
                         editor.returnPressed.connect(self.flush)
                     editor.setObjectName("field_" + col.id)
                     editor.setAccessibleName(col.label)
+                    field_label.setBuddy(editor)
+                    editor.installEventFilter(self)
                     self.editors[col.id] = editor
                     form.addWidget(editor)
-                    form.addSpacing(6)
+                    form.addSpacing(8)
             form.addStretch()
             old = self.scroll.takeWidget()
             self.scroll.setWidget(content)
@@ -188,14 +225,29 @@ class RecordForm(QWidget):
             self.signature = signature
             self.loading = False
         self.key = key
+        self.result.setVisible(bool(key))
         if not key:
             self.heading.setText("等待选择联系人")
             self.summary.setText("选择一条记录后，填写字段会显示在这里。")
             return True
         self.heading.setText(sheet.name(row) or "未填写姓名")
-        self.summary.setText(sheet.title + " · 当前记录")
+        self.summary.setText(sheet.title)
+        if changed_key:
+            self.result.setText("已保存")
+            self.result.setToolTip("已保存到本机")
+            set_tone(self.result, "success")
         self._update_values(row, force=changed_key)
         return True
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.FocusIn and watched in self.editors.values():
+            # Keyboard navigation to fields below the fold must reveal the whole input.
+            QTimer.singleShot(0, lambda editor=watched: self._reveal_editor(editor))
+        return super().eventFilter(watched, event)
+
+    def _reveal_editor(self, editor):
+        if shiboken6.isValid(editor):
+            self.scroll.ensureWidgetVisible(editor, 0, 16)
 
     def _get(self, editor):
         if isinstance(editor, QPlainTextEdit):
@@ -227,7 +279,9 @@ class RecordForm(QWidget):
         if self.loading or not self.key:
             return
         self.pending[cid] = self._get(self.editors[cid])
-        self.result.setText("正在保存…")
+        self.result.setText("待保存")
+        self.result.setToolTip("停止输入后自动保存，或按 Ctrl+S 立即保存。")
+        set_tone(self.result, "pending")
         self.timer.start()
 
     def flush(self) -> bool:
@@ -236,14 +290,20 @@ class RecordForm(QWidget):
             return True
         if self.workspace.save_values(*self.key, dict(self.pending)):
             self.pending.clear()
-            self.result.setText("已自动保存到本机")
-            self.result.setStyleSheet("color: #166534")
-            self.retry.hide()
+            self.result.setText("已保存")
+            self.result.setToolTip("已保存到本机")
+            set_tone(self.result, "success")
+            self._save_failed = False
+            self.error_row.hide()
+            self.summary.setVisible(self._summary_enabled)
             self.bind(self.key)
             return True
-        self.result.setText("保存失败，输入已保留；请重试后再切换。")
-        self.result.setStyleSheet("color: #B91C1C")
-        self.retry.show()
+        self.result.setText("保存失败")
+        self.result.setToolTip("输入已保留；请修正填写内容或检查保存目录，再重试保存。")
+        set_tone(self.result, "error")
+        self._save_failed = True
+        self.summary.hide()
+        self.error_row.show()
         return False
 
     def _external_change(self, sid, rid, changes):
@@ -262,8 +322,8 @@ class ContactDialog(QDialog):
         layout.addWidget(label("指定用于打开和识别聊天的字段", "section"))
         layout.addWidget(label("联系人备注优先；为空时使用「前缀 + 姓名」。每张表独立保存配置。"))
         form = QFormLayout()
-        self.name = QComboBox()
-        self.remark = QComboBox()
+        self.name = FieldComboBox()
+        self.remark = FieldComboBox()
         for widget in (self.name, self.remark):
             widget.addItem("不使用", "")
             for column in sheet.columns:
@@ -290,6 +350,7 @@ class ContactDialog(QDialog):
         layout.addWidget(label("只搜索和打开联系人，不发送消息、不修改备注。关闭验证后需自行核对搜索结果，且无法保证浮窗自动识别。"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName("primary")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -310,7 +371,7 @@ class FieldDialog(QDialog):
         self.setMinimumWidth(380)
         layout = QFormLayout(self)
         self.name = QLineEdit()
-        self.kind = QComboBox()
+        self.kind = FieldComboBox()
         for title, key in (("单行文本", "text"), ("多行文本", "multiline"), ("下拉选项", "choice"), ("日期", "date")):
             self.kind.addItem(title, key)
         self.options = QPlainTextEdit()
@@ -323,6 +384,7 @@ class FieldDialog(QDialog):
         layout.addRow("选项", self.options)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("添加")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("primary")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -338,13 +400,16 @@ class FloatingWindow(QWidget):
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.workspace, self.owner = workspace, owner
         self.setObjectName("floating")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle("随聊填写 · TableFillingTool")
+        self.setWindowIcon(icon("brand"))
         self.resize(350, 670)
-        self.setMinimumSize(290, 380)
+        self.setMinimumSize(290, 420)
         self.probe = probe
         self.last_title = ""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
         header = QHBoxLayout()
         header.addWidget(label("随聊填写", "section"), 1)
         self.pin = QCheckBox("置顶")
@@ -352,19 +417,31 @@ class FloatingWindow(QWidget):
         self.pin.toggled.connect(self._pin)
         header.addWidget(self.pin)
         layout.addLayout(header)
-        self.scope = QComboBox()
+        scope_row = QHBoxLayout()
+        scope_label = label("范围", "caption")
+        scope_row.addWidget(scope_label)
+        self.scope = FieldComboBox()
+        scope_label.setBuddy(self.scope)
         self.scope.setAccessibleName("浮窗识别范围")
         self.scope.currentIndexChanged.connect(self._scope_changed)
-        layout.addWidget(self.scope)
-        self.follow = QCheckBox("自动跟随企业微信独立聊天窗口")
+        scope_row.addWidget(self.scope, 1)
+        layout.addLayout(scope_row)
+        self.follow = QCheckBox("自动跟随当前企微聊天")
+        self.follow.setAccessibleName("自动跟随企业微信独立聊天窗口")
         self.follow.setChecked(True)
+        self.follow.toggled.connect(self._follow_toggled)
         layout.addWidget(self.follow)
-        self.notice = label("激活企业微信独立聊天窗口以识别联系人。", "banner")
+        self.notice = label("等待企业微信独立聊天窗口…", "banner")
         self.notice.setAccessibleName("聊天识别状态")
         layout.addWidget(self.notice)
         self.form = RecordForm(workspace)
-        layout.addWidget(self.form, 1)
-        layout.addWidget(button("使用主表所选记录（手动填写）", self.use_current))
+        form_surface = QWidget()
+        form_surface.setObjectName("detailPanel")
+        form_layout = QVBoxLayout(form_surface)
+        form_layout.setContentsMargins(12, 12, 12, 12)
+        form_layout.addWidget(self.form)
+        layout.addWidget(form_surface, 1)
+        layout.addWidget(button("使用主表所选记录", self.use_current, name="quiet", glyph="edit"))
         self.timer = QTimer(self)
         self.timer.setInterval(500)
         self.timer.timeout.connect(self.poll)
@@ -403,7 +480,15 @@ class FloatingWindow(QWidget):
     def use_current(self):
         if self.owner.current_key and self.form.bind(self.owner.current_key):
             self.follow.setChecked(False)
-            self.notice.setText("手动填写中 · 勾选自动跟随可恢复聊天识别。")
+            self._notice("手动填写中。勾选自动跟随可恢复识别。", "idle")
+
+    def _follow_toggled(self, checked):
+        if hasattr(self, "notice"):
+            self._notice("等待企业微信独立聊天窗口…" if checked else "自动跟随已暂停，可手动填写当前记录。", "idle")
+
+    def _notice(self, text, tone):
+        self.notice.setText(text)
+        set_tone(self.notice, tone)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -425,7 +510,7 @@ class FloatingWindow(QWidget):
                 self.probe = NativeDesktop()
             window = self.probe.foreground()
         except Exception as exc:
-            self.notice.setText(str(exc))
+            self._notice(str(exc), "error")
             return
         if window and window.is_wecom and window.title not in ("企业微信", "WeCom"):
             self.last_title = window.title
@@ -435,14 +520,14 @@ class FloatingWindow(QWidget):
         matches = candidates(self.workspace.sheets, title, self.scope.currentData() or "")
         key = matches[0] if len(matches) == 1 else None
         if not self.form.bind(key):
-            self.notice.setText("保存失败，已暂停切换；请先重试保存当前输入。")
+            self._notice("保存失败，已暂停切换；请先重试保存当前输入。", "error")
             return False
         if len(matches) > 1:
-            self.notice.setText("匹配到多条记录。请限定表格，或填写唯一的联系人备注；不会自动选择。")
+            self._notice("匹配到多条记录。请限定表格或补充唯一备注。", "warning")
         elif not matches:
-            self.notice.setText("当前聊天未匹配。请检查姓名列、备注和前缀设置。")
+            self._notice("当前聊天未匹配。请检查姓名列、备注和前缀。", "warning")
         else:
-            self.notice.setText("已跟随当前聊天 · 修改后自动保存")
+            self._notice("已识别当前联系人，填写后自动保存。", "success")
         return len(matches) == 1
 
 
@@ -457,6 +542,7 @@ class MainWindow(QMainWindow):
         self.contact_job = None
         self._clipboard_backup = None
         self.setWindowTitle("TableFillingTool · 随聊填表")
+        self.setWindowIcon(icon("brand"))
         self.resize(1320, 820)
         self.setMinimumSize(980, 620)
         central = QWidget()
@@ -466,78 +552,125 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(208)
+        sidebar.setFixedWidth(210)
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(12, 24, 12, 16)
-        side.setSpacing(12)
-        side.addWidget(label("随聊填表", "brand"))
-        side.addWidget(label("TableFillingTool"))
-        side.addSpacing(20)
-        side.addWidget(label("我的表格", "section"))
+        side.setContentsMargins(14, 24, 14, 20)
+        side.setSpacing(10)
+        brand = QHBoxLayout()
+        brand_mark = QLabel()
+        brand_mark.setPixmap(icon("brand").pixmap(34, 34))
+        brand.addWidget(brand_mark)
+        brand.addWidget(label("随聊填表", "brand"), 1)
+        side.addLayout(brand)
+        side.addWidget(label("联系人记录工作台", "caption"))
+        side.addSpacing(24)
+        nav_heading = QHBoxLayout()
+        nav_heading.addWidget(label("我的表格", "section"), 1)
+        self.sheet_count = label("0", "countBadge")
+        nav_heading.addWidget(self.sheet_count)
+        side.addLayout(nav_heading)
         self.sheet_list = QListWidget()
         self.sheet_list.setAccessibleName("我的表格")
+        self.sheet_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sheet_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.sheet_list.setIconSize(QSize(18, 18))
         self.sheet_list.currentRowChanged.connect(self._select_sheet)
         side.addWidget(self.sheet_list, 1)
-        side.addWidget(button("新建表格", self.new_sheet))
-        side.addWidget(label("本机保存 · 无需平台账号\n只打开联系人，不发送消息"))
+        side.addWidget(button("新建表格", self.new_sheet, glyph="plus"))
+        side.addSpacing(16)
+        local = QHBoxLayout()
+        local_mark = QLabel()
+        local_mark.setPixmap(icon("shield", COLORS["accent"]).pixmap(17, 17))
+        local.addWidget(local_mark)
+        local.addWidget(label("填写内容保存在本机", "caption"), 1)
+        side.addLayout(local)
         outer.addWidget(sidebar)
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(24, 22, 24, 16)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(22)
         heading = QHBoxLayout()
         title_stack = QVBoxLayout()
-        self.title = label("把表格和聊天放在一起", "title")
-        self.subtitle = label("导入名单，打开联系人，在浮窗中完成填写。")
+        self.title = ElidedLabel("我的工作空间")
+        self.title.setObjectName("title")
+        self.title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.subtitle = label("在聊天过程中，完成每一条记录。", "caption")
         title_stack.addWidget(self.title)
         title_stack.addWidget(self.subtitle)
         heading.addLayout(title_stack, 1)
-        self.import_button = button("导入表格", self.import_dialog, primary=True)
-        self.export_button = button("导出当前表", self.export_dialog)
+        self.import_button = button("导入表格", self.import_dialog, glyph="import")
+        self.export_button = button("导出当前表", self.export_dialog, glyph="export")
+        self.follow_button = button("聊天跟随浮窗", self.show_floating, primary=True, glyph="chat")
         heading.addWidget(self.import_button)
         heading.addWidget(self.export_button)
+        heading.addSpacing(4)
+        heading.addWidget(self.follow_button)
         layout.addLayout(heading)
         self.stack = QStackedWidget()
         self.empty = QWidget()
         empty_layout = QVBoxLayout(self.empty)
+        empty_layout.setSpacing(16)
         empty_layout.addStretch()
-        empty_title = label("从一张表开始", "title")
+        empty_mark = QLabel()
+        empty_mark.setPixmap(icon("table", COLORS["accent"]).pixmap(60, 60))
+        empty_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_mark)
+        empty_title = label("先导入一张表", "emptyTitle")
         empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_title)
-        empty_description = label("支持 Excel（.xlsx）与 CSV\n第一行作为字段名，每行作为一位联系人。\n原文件保持不变，填写内容自动保存在本机。")
+        empty_description = label("支持 Excel 和 CSV，第一行作为字段名。\n导入后即可打开联系人，在聊天浮窗中持续填写。")
         empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_description)
         empty_actions = QHBoxLayout()
         empty_actions.addStretch()
-        empty_actions.addWidget(button("导入我的表格", self.import_dialog, primary=True))
-        empty_actions.addWidget(button("创建空白表格", self.new_sheet))
-        empty_actions.addWidget(button("体验虚构示例", self.sample))
+        self.empty_import = button("导入我的表格", self.import_dialog, primary=True, glyph="import")
+        empty_actions.addWidget(self.empty_import)
+        empty_actions.addWidget(button("创建空白表格", self.new_sheet, glyph="plus"))
         empty_actions.addStretch()
         empty_layout.addLayout(empty_actions)
+        example = button("先体验虚构示例", self.sample, name="link")
+        empty_layout.addWidget(example, alignment=Qt.AlignmentFlag.AlignCenter)
         empty_layout.addStretch()
         self.stack.addWidget(self.empty)
         self.workbench = QWidget()
         work = QVBoxLayout(self.workbench)
         work.setContentsMargins(0, 0, 0, 0)
         work.setSpacing(12)
-        tools = QHBoxLayout()
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setHandleWidth(14)
+        self.splitter.setChildrenCollapsible(False)
+        table_surface = QWidget()
+        table_surface.setObjectName("tableSurface")
+        table_layout = QVBoxLayout(table_surface)
+        table_layout.setContentsMargins(1, 1, 1, 1)
+        table_layout.setSpacing(0)
+        toolbar = QWidget()
+        tools = QHBoxLayout(toolbar)
+        tools.setContentsMargins(12, 12, 12, 12)
+        tools.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索当前表格…")
         self.search.setAccessibleName("搜索当前表格")
+        self.search.setObjectName("search")
         self.search.setClearButtonEnabled(True)
-        self.search.setMaximumWidth(320)
+        self.search.setMinimumWidth(110)
+        search_action = self.search.addAction(icon("search"), QLineEdit.ActionPosition.LeadingPosition)
+        search_action.setText("搜索当前表格")
+        search_action.setToolTip("输入关键词搜索当前表格")
+        search_action.triggered.connect(lambda: self.search.setFocus())
         tools.addWidget(self.search, 1)
-        tools.addWidget(button("重新筛选", self.reapply_filter))
-        tools.addWidget(button("新增行", self.add_row))
-        tools.addWidget(button("添加字段", self.add_column))
-        tools.addStretch()
-        tools.addWidget(button("联系人设置", self.configure))
-        tools.addWidget(button("聊天跟随浮窗", self.show_floating, primary=True))
-        work.addLayout(tools)
-        self.summary = label("双击单元格编辑；也可在右侧集中填写。")
-        work.addWidget(self.summary)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.table = QTableView()
+        self.reapply_button = button("重新筛选", self.reapply_filter, name="quiet", glyph="refresh")
+        self.reapply_button.setText("")
+        self.reapply_button.setProperty("iconOnly", True)
+        self.reapply_button.setFixedWidth(34)
+        self.reapply_button.setToolTip("重新应用当前筛选")
+        tools.addWidget(self.reapply_button)
+        self.add_row_button = button("新增行", self.add_row, name="quiet", glyph="plus")
+        self.add_field_button = button("添加字段", self.add_column, name="quiet", glyph="fields")
+        tools.addWidget(self.add_row_button)
+        tools.addWidget(self.add_field_button)
+        table_layout.addWidget(toolbar)
+        self.table = WorkbenchTable()
         self.table.setAccessibleName("联系人表格")
         self.model = TableModel(workspace)
         self.filter = TableFilter()
@@ -546,12 +679,13 @@ class MainWindow(QMainWindow):
         self.delegate = CellDelegate(workspace, self.table)
         self.table.setItemDelegate(self.delegate)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.verticalHeader().setDefaultSectionSize(42)
-        self.table.horizontalHeader().setDefaultSectionSize(155)
+        self.table.horizontalHeader().setDefaultSectionSize(148)
         self.table.horizontalHeader().setMinimumSectionSize(90)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionsMovable(True)
@@ -560,25 +694,54 @@ class MainWindow(QMainWindow):
         delete = QAction("删除选中的行…", self.table)
         delete.triggered.connect(self.delete_rows)
         self.table.addAction(delete)
-        splitter.addWidget(self.table)
+        table_layout.addWidget(self.table, 1)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(14, 10, 14, 10)
+        self.summary = label("0 条记录", "caption")
+        footer.addWidget(self.summary, 1)
+        footer.addWidget(label("双击单元格编辑", "caption"))
+        table_layout.addLayout(footer)
+        self.table_empty_title = label("还没有记录", "section")
+        self.table_empty_help = label("新增一行，开始填写联系人信息。", "caption")
+        for text in (self.table_empty_title, self.table_empty_help):
+            text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.empty_layout.addWidget(text)
+        self.table_empty_action = button("新增首行", self._empty_table_action, glyph="plus")
+        self.table.empty_layout.addWidget(self.table_empty_action, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.table.empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.splitter.addWidget(table_surface)
         editor = QWidget()
+        editor.setObjectName("detailPanel")
         editor_layout = QVBoxLayout(editor)
-        editor_layout.setContentsMargins(12, 0, 0, 0)
-        self.open_button = button("打开企微联系人   F8", self.open_contact, primary=True)
-        editor_layout.addWidget(self.open_button)
+        editor_layout.setContentsMargins(18, 18, 18, 18)
+        editor_layout.setSpacing(14)
+        details_heading = QHBoxLayout()
+        details_heading.addWidget(label("填写记录", "section"), 1)
+        self.contact_settings_button = button("联系人设置", self.configure, name="quiet", glyph="settings")
+        details_heading.addWidget(self.contact_settings_button)
+        editor_layout.addLayout(details_heading)
         self.form = RecordForm(workspace)
+        self.form.set_summary_visible(False)
+        self.form.action_layout.setContentsMargins(0, 4, 0, 4)
+        self.open_button = button("打开企微联系人", self.open_contact, name="contactAction", glyph="contact")
+        self.open_button.setToolTip("打开当前联系人的企业微信独立聊天窗（F8）")
+        self.form.action_layout.addWidget(self.open_button)
+        self.contact_hint = ElidedLabel("")
+        self.contact_hint.setObjectName("caption")
+        self.form.action_layout.addWidget(self.contact_hint)
         editor_layout.addWidget(self.form, 1)
-        editor.setMinimumWidth(260)
-        splitter.addWidget(editor)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([760, 300])
-        work.addWidget(splitter, 1)
+        editor.setMinimumWidth(280)
+        self.splitter.addWidget(editor)
+        self.splitter.setStretchFactor(0, 4)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([760, 320])
+        work.addWidget(self.splitter, 1)
         self.stack.addWidget(self.workbench)
         layout.addWidget(self.stack, 1)
         outer.addWidget(body, 1)
-        self.status = label("已就绪 · 数据仅保存在本机")
+        self.status = label("就绪", "appStatus")
         self.statusBar().addWidget(self.status, 1)
+        self.statusBar().addPermanentWidget(label("Ctrl+S 立即保存", "caption"))
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setMaximumWidth(140)
@@ -588,6 +751,7 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(self._filter_changed)
         self.workspace.sheetsChanged.connect(self._refresh_sheets)
         self.workspace.structureChanged.connect(self._structure)
+        self.workspace.cellsChanged.connect(self._record_edited)
         self.workspace.notice.connect(self.show_notice)
         self._shortcuts()
         self._refresh_sheets()
@@ -598,7 +762,7 @@ class MainWindow(QMainWindow):
 
     def show_notice(self, text, error=False):
         self.status.setText(text)
-        self.status.setStyleSheet("color: #B91C1C" if error else "color: #475569")
+        set_tone(self.status, "error" if error else "idle")
 
     def _shortcuts(self):
         for key, callback in (("Ctrl+O", self.import_dialog), ("Ctrl+N", self.new_sheet),
@@ -615,12 +779,14 @@ class MainWindow(QMainWindow):
 
     def _refresh_sheets(self):
         current = self.model.sheet_id
+        self.sheet_count.setText(str(len(self.workspace.sheets)))
         with QSignalBlocker(self.sheet_list):
             self.sheet_list.clear()
             for sheet in self.workspace.sheets:
                 item = QListWidgetItem(f"{sheet.title}\n{len(sheet.rows)} 条记录")
                 item.setData(Qt.ItemDataRole.UserRole, sheet.id)
                 item.setToolTip(sheet.title)
+                item.setIcon(icon("table"))
                 self.sheet_list.addItem(item)
             target = next((i for i, sheet in enumerate(self.workspace.sheets) if sheet.id == current), 0)
             self.sheet_list.setCurrentRow(target if self.workspace.sheets else -1)
@@ -647,12 +813,15 @@ class MainWindow(QMainWindow):
         self._filter_text = ""
         self._selecting = False
         self.stack.setCurrentWidget(self.workbench if sid else self.empty)
+        for control in (self.import_button, self.export_button, self.follow_button):
+            control.setVisible(bool(sid))
         self.export_button.setEnabled(bool(sid))
         self.open_button.setEnabled(False)
+        self.contact_hint.hide()
         if sid:
             sheet = self.workspace.sheet(sid)
             self.title.setText(sheet.title)
-            self.subtitle.setText("选择联系人 → 打开企微 → 随聊填写")
+            self.subtitle.setText(f"{len(sheet.columns)} 个字段，填写内容自动保存在本机")
             self._counts()
             if self.filter.rowCount():
                 self.table.setCurrentIndex(self.filter.index(0, 0))
@@ -672,6 +841,20 @@ class MainWindow(QMainWindow):
             return
         self.current_key = key
         self.open_button.setEnabled(not self.contact_busy)
+        self._update_contact_hint()
+
+    def _record_edited(self, sid, rid, changes):
+        if self.current_key == (sid, rid):
+            self._update_contact_hint()
+
+    def _update_contact_hint(self):
+        if self.current_key:
+            sheet = self.workspace.sheet(self.current_key[0])
+            query = sheet.contact(sheet.row(self.current_key[1]))
+            self.contact_hint.setText("搜索：" + query if query else "请填写姓名或在设置中指定姓名列")
+            self.contact_hint.show()
+        else:
+            self.contact_hint.hide()
 
     def _structure(self, sid):
         if sid == self.model.sheet_id:
@@ -686,6 +869,8 @@ class MainWindow(QMainWindow):
                     self.form.bind(None)
                     self.open_button.setEnabled(False)
             self._counts()
+            self.subtitle.setText(f"{len(self.model.sheet.columns)} 个字段，填写内容自动保存在本机")
+            self._update_contact_hint()
         for i, sheet in enumerate(self.workspace.sheets):
             item = self.sheet_list.item(i)
             if item:
@@ -693,7 +878,21 @@ class MainWindow(QMainWindow):
 
     def _counts(self):
         if self.model.sheet:
-            self.summary.setText(f"{self.filter.rowCount()} / {len(self.model.sheet.rows)} 条记录 · 双击单元格编辑，修改自动保存 · 导出包含当前表全部行")
+            count, total = self.filter.rowCount(), len(self.model.sheet.rows)
+            self.summary.setText(f"显示 {count} / {total} 条记录" if self.search.text() else f"共 {total} 条记录")
+            self.table.empty_overlay.setVisible(count == 0)
+            if not count:
+                filtered = bool(self.search.text())
+                self.table_empty_title.setText("没有符合条件的记录" if filtered else "还没有记录")
+                self.table_empty_help.setText("试试其他关键词，或清除当前搜索。" if filtered else "新增一行，开始填写联系人信息。")
+                self.table_empty_action.setText("清除搜索" if filtered else "新增首行")
+                self.table.position_empty()
+
+    def _empty_table_action(self):
+        if self.search.text():
+            self.search.clear()
+        else:
+            self.add_row()
 
     def select_record(self, rid):
         if not self.model.sheet:
@@ -720,6 +919,7 @@ class MainWindow(QMainWindow):
             self.current_key = None
             self.form.bind(None)
             self.open_button.setEnabled(False)
+            self.contact_hint.hide()
 
     def reapply_filter(self):
         self._filter_changed(self.search.text())
@@ -802,6 +1002,7 @@ class MainWindow(QMainWindow):
             self.show_notice("文件操作进行中，请稍候。")
             return
         self.import_button.setEnabled(False)
+        self.empty_import.setEnabled(False)
         self.export_button.setEnabled(False)
         self.progress.show()
         job = Job(operation, self)
@@ -815,6 +1016,7 @@ class MainWindow(QMainWindow):
     def _file_finished(self):
         self.file_job = None
         self.import_button.setEnabled(True)
+        self.empty_import.setEnabled(True)
         self.export_button.setEnabled(bool(self.model.sheet))
         self.progress.hide()
 

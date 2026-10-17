@@ -5,14 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
 from app.data import Store
 from app.fonts import configure_font
 from app.service import Workspace
-from app.theme import STYLE
+from app.theme import COLORS, STYLE
 from app.ui import MainWindow
 from test_core import fixture
 
@@ -207,6 +207,126 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(self.window.export_button.isEnabled())
         self.assertEqual(len(self.workspace.sheets), 1)
         self.assertIn("invalid workbook", self.window.status.text())
+
+    def test_narrow_layout_keeps_primary_controls_inside_window(self):
+        self.window.resize(980, 620)
+        self.window.title.setText("这是一张具有很长名称的虚构联系人填写与反馈记录工作表")
+        APP.processEvents()
+        self.assertEqual((self.window.width(), self.window.height()), (980, 620))
+        for control in (self.window.import_button, self.window.export_button, self.window.follow_button,
+                        self.window.search, self.window.add_row_button, self.window.add_field_button,
+                        self.window.contact_settings_button, self.window.open_button):
+            self.assertTrue(control.isVisible())
+            top = control.mapTo(self.window, QPoint(0, 0))
+            bottom = control.mapTo(self.window, control.rect().bottomRight())
+            self.assertTrue(self.window.rect().contains(top), control.accessibleName())
+            self.assertTrue(self.window.rect().contains(bottom), control.accessibleName())
+        self.assertLess(self.window.title.width(), self.window.title.fontMetrics().horizontalAdvance(self.window.title.text()))
+        self.assertEqual(self.window.title.toolTip(), self.window.title.text())
+
+    def test_no_results_action_clears_filter_without_changing_data(self):
+        self.window.search.setText("虚构无匹配关键词")
+        APP.processEvents()
+        self.assertTrue(self.window.table.empty_overlay.isVisible())
+        self.assertEqual(self.window.table_empty_action.text(), "清除搜索")
+        self.window.table_empty_action.click()
+        APP.processEvents()
+        self.assertEqual(self.window.search.text(), "")
+        self.assertEqual(len(self.sheet.rows), 2)
+        self.assertFalse(self.window.table.empty_overlay.isVisible())
+
+    def test_empty_table_action_creates_first_record(self):
+        empty = fixture("空表", names=())
+        self.workspace.add_sheets([empty])
+        self.window.sheet_list.setCurrentRow(1)
+        APP.processEvents()
+        self.assertTrue(self.window.table.empty_overlay.isVisible())
+        self.assertEqual(self.window.table_empty_action.text(), "新增首行")
+        self.window.table_empty_action.click()
+        APP.processEvents()
+        self.assertEqual(len(empty.rows), 1)
+        self.assertEqual(self.window.form.key, (empty.id, empty.rows[0].id))
+        self.assertFalse(self.window.table.empty_overlay.isVisible())
+
+    def test_small_floating_error_has_readable_status_and_reachable_retry(self):
+        floating = self.window.floating
+        floating.form.bind(self.window.current_key)
+        floating.follow.setChecked(False)
+        floating.resize(290, 420)
+        floating.show()
+        floating.timer.stop()
+        APP.processEvents()
+        self.enter(floating.form, self.sheet.columns[2].id, "保留的草稿")
+        with patch.object(self.store, "save_cells", side_effect=OSError("disk full")):
+            self.assertFalse(floating.form.flush())
+            APP.processEvents()
+            self.assertEqual(floating.form.result.text(), "保存失败")
+            self.assertEqual(floating.form.result.property("tone"), "error")
+            self.assertTrue(floating.form.error_row.isVisible())
+            retry_bottom = floating.form.retry.mapTo(floating, floating.form.retry.rect().bottomRight())
+            self.assertTrue(floating.rect().contains(retry_bottom))
+            self.assertEqual(floating.form.pending[self.sheet.columns[2].id], "保留的草稿")
+        self.assertTrue(floating.form.flush())
+        APP.processEvents()
+        self.assertFalse(floating.form.error_row.isVisible())
+        self.assertEqual(floating.form.result.property("tone"), "success")
+        self.assertGreaterEqual(floating.form.result.width(),
+                                floating.form.result.fontMetrics().horizontalAdvance(floating.form.result.text()))
+
+    def test_keyboard_focus_reveals_field_below_fold_and_labels_have_buddies(self):
+        from app.data import Column
+        for index in range(8):
+            self.workspace.add_column(self.sheet.id, Column(f"额外填写字段{index}"))
+        self.window.resize(980, 620)
+        APP.processEvents()
+        labels = self.window.form.scroll.widget().findChildren(QLabel)
+        self.assertEqual(sum(label.buddy() is not None for label in labels), len(self.sheet.columns))
+        last = self.window.form.editors[self.sheet.columns[-1].id]
+        self.window.activateWindow()
+        last.setFocus(Qt.FocusReason.TabFocusReason)
+        QTest.qWait(20)
+        center = last.mapTo(self.window.form.scroll.viewport(), last.rect().center())
+        self.assertTrue(self.window.form.scroll.viewport().rect().contains(center))
+        self.assertEqual(self.window.form.key, (self.sheet.id, self.sheet.rows[0].id))
+
+    def test_status_colors_use_text_and_not_color_alone(self):
+        floating = self.window.floating
+        self.assertTrue(floating.match_title("py169张三"))
+        self.assertEqual(floating.notice.property("tone"), "success")
+        self.assertIn("已识别", floating.notice.text())
+        self.assertFalse(floating.match_title("未知联系人"))
+        self.assertEqual(floating.notice.property("tone"), "warning")
+        self.assertIn("未匹配", floating.notice.text())
+        floating.follow.setChecked(False)
+        self.assertIn("暂停", floating.notice.text())
+        self.assertEqual(floating.notice.property("tone"), "idle")
+
+    def test_form_save_status_does_not_wrap_at_minimum_width(self):
+        self.window.resize(980, 620)
+        APP.processEvents()
+        result = self.window.form.result
+        self.assertFalse(result.wordWrap())
+        self.assertGreaterEqual(result.width(), result.fontMetrics().horizontalAdvance(result.text()))
+
+
+class ContrastTests(unittest.TestCase):
+    def test_semantic_text_and_control_contrast(self):
+        def luminance(color):
+            rgb = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in rgb]
+            return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+        def contrast(one, two):
+            low, high = sorted((luminance(COLORS[one]), luminance(COLORS[two])))
+            return (high + 0.05) / (low + 0.05)
+
+        for foreground, background in (("ink", "surface"), ("muted", "surface"), ("muted", "canvas"),
+                                       ("surface", "accent"), ("surface", "navy"),
+                                       ("accent_text", "accent_soft"), ("danger", "danger_soft"),
+                                       ("warning", "warning_soft")):
+            self.assertGreaterEqual(contrast(foreground, background), 4.5, (foreground, background))
+        self.assertGreaterEqual(contrast("input_border", "surface"), 3)
+        self.assertGreaterEqual(contrast("accent", "surface"), 3)
 
 
 if __name__ == "__main__":
