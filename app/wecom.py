@@ -238,6 +238,6 @@ class ContactSearch:
             raise ValueError("无效的联系人匹配方式")
         main, chat = self._locate(contact)
         if not contact_matches(contact, chat.title, mode):
-            return "待确认", chat.title, "联系人标题不匹配；原值保留，已暂停供人工核对"
+            return "待确认", chat.title, "联系人标题不匹配；原值保留"
         self._close_chat(main, chat)
         return "已添加", chat.title, "已确认联系人"

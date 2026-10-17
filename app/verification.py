@@ -93,7 +93,7 @@ class VerificationJob(QThread):
         except ContactNotFoundError as exc:
             result = "未找到", "", str(exc) + "；保留原值"
         except Exception as exc:
-            result = "失败", "", str(exc) + "；原值保留，已暂停"
+            result = "失败", "", str(exc) + "；原值保留"
         self.checked.emit(*result)
 
 

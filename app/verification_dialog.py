@@ -60,7 +60,7 @@ class VerificationDialog(QDialog):
             text.setBuddy(widget)
             fields.addRow(text, widget)
         layout.addWidget(self.settings_panel)
-        hint = QLabel("搜索词 = 前缀 + 字段值。只在确认匹配时写入“是”；其余保留原值。\n验证期间请勿操作鼠标键盘；F11 在当前联系人结束后暂停或继续。")
+        hint = QLabel("搜索词 = 前缀 + 字段值。只在确认匹配时写入“是”；未通过不写入，自动继续。\n验证期间请勿操作鼠标键盘；F11 在当前联系人结束后暂停或继续。")
         hint.setObjectName("caption")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -209,9 +209,7 @@ class VerificationDialog(QDialog):
         self.results.scrollToItem(self.results.item(self.cursor, 0))
         self.cursor += 1
         self.progress.setValue(self.cursor)
-        # Ambiguous title / focus or write failure requires an explicit resume.
-        if (state == "失败" or (state == "待确认" and not task.review)) and self.cursor < len(self.tasks):
-            self.pause_requested = True
+        # Only an explicit user pause stops the next contact; failures never write values.
 
     def job_finished(self):
         clipboard = QApplication.clipboard()

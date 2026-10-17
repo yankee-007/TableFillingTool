@@ -229,16 +229,31 @@ class QueryAndBatchTests(unittest.TestCase):
         self.assertEqual(self.sheet.rows[0].cells[self.result.id], "是")
         self.assertNotIn(self.result.id, self.sheet.rows[2].cells)
 
-    def test_failure_pauses_and_unconfirmed_preserves_existing_value(self):
+    def test_unconfirmed_missing_and_failed_contacts_continue_without_any_write(self):
         self.sheet.rows[0].cells[self.result.id] = "否"
+        original = [dict(row.cells) for row in self.sheet.rows]
         self.start()
-        self.dialog.job.complete("待确认", "其他联系人", "不匹配")
-        self.assertTrue(self.dialog.paused)
-        self.assertEqual(self.sheet.rows[0].cells[self.result.id], "否")
+        with patch.object(self.workspace, "save_values", wraps=self.workspace.save_values) as save:
+            for i, state in enumerate(("待确认", "未找到", "失败")):
+                self.assertEqual(self.dialog.job.query, self.sheet.rows[i].cells[self.search_cid])
+                self.dialog.job.complete(state, "其他联系人" if i == 0 else "", "未通过")
+                self.assertFalse(self.dialog.paused)
+                self.assertFalse(self.dialog.pause_requested)
+                self.assertEqual(self.dialog.results.item(i, 1).text(), state)
+                if i < 2:
+                    self.assertIsNotNone(self.dialog.job)
+            save.assert_not_called()
+        self.assertFalse(self.dialog.active)
+        self.assertEqual([row.cells for row in self.sheet.rows], original)
+
+    def test_explicit_pause_still_applies_after_failed_contact(self):
+        self.start()
         self.dialog.toggle_pause()
         self.dialog.job.complete("失败", "", "焦点变化")
         self.assertTrue(self.dialog.paused)
-        self.assertNotIn(self.result.id, self.sheet.rows[1].cells)
+        self.assertIsNone(self.dialog.job)
+        self.dialog.toggle_pause()
+        self.assertEqual(self.dialog.job.query, "李四")
 
     def test_result_or_identity_changes_while_running_are_not_overwritten(self):
         self.start()
@@ -256,7 +271,9 @@ class QueryAndBatchTests(unittest.TestCase):
             self.dialog.job.complete()
         self.assertEqual(self.dialog.results.item(0, 1).text(), "失败")
         self.assertNotIn(self.result.id, self.sheet.rows[0].cells)
-        self.assertTrue(self.dialog.paused)
+        self.assertFalse(self.dialog.paused)
+        self.assertFalse(self.dialog.pause_requested)
+        self.assertEqual(self.dialog.job.query, "李四")
 
     def test_clipboard_restored_but_intervening_user_copy_is_preserved(self):
         APP.clipboard().setText("原始剪贴板")
